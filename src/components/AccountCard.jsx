@@ -61,7 +61,18 @@ export default function AccountCard() {
 
   async function copy() {
     if (!account?.number) return
-    try { await navigator.clipboard.writeText(account.number) } catch { return }
+    const text = account.number
+    if (navigator.clipboard) {
+      try { await navigator.clipboard.writeText(text) } catch { return }
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px'
+      document.body.appendChild(ta)
+      ta.focus(); ta.select()
+      try { document.execCommand('copy') } catch { document.body.removeChild(ta); return }
+      document.body.removeChild(ta)
+    }
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
