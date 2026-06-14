@@ -1,54 +1,36 @@
 # Mullvad Gateway UI
 
-A self-hosted web dashboard for managing a Mullvad VPN gateway. Works on any Linux host that has the Mullvad daemon installed — bare metal, VM, Proxmox LXC, Docker, whatever.
+A self-hosted web dashboard for managing a Mullvad VPN gateway from a browser. It drives the local
+`mullvad` CLI behind an interactive orthographic globe: spin it, pick a city, connect. Built for a
+gateway box (a Proxmox LXC, a VM, a spare Pi) where you want to see and change the tunnel without SSHing
+in — but it runs on any Linux host with the Mullvad daemon installed.
 
-Features: interactive orthographic globe, per-city relay selection, DAITA filter, account info with days remaining, settings toggles (auto-connect, lockdown mode, LAN access, quantum resistance, multihop), and a blocked-domain reconnect webhook.
+![Mullvad Gateway UI — orthographic globe with relay cities, connection status, account, and settings](docs/screenshots/dashboard.png)
 
-## Requirements
+The globe shows every relay city; the connected relay gets a ring. The right rail is connection status
+(relay, location, exit IP, DNS) with connect/disconnect/reconnect, the account (days remaining), and the
+settings that matter for a gateway: DAITA, auto-connect, lockdown mode, LAN sharing, quantum resistance,
+and multihop. There's also a **reconnect webhook** so an ad-blocker or DNS filter can rotate the exit IP
+on its own (see below).
 
-- Linux (any distro — Debian, Ubuntu, Alpine, Arch, Gentoo, etc.)
-- Node.js 20+
-- [Mullvad VPN](https://mullvad.net/download) daemon installed and running (`mullvad-daemon.service`)
-- A Mullvad account number (16 digits)
+## Quickstart
 
-## Installation
-
-### 1. Install Mullvad
-
-```bash
-curl -fsSLo /usr/share/keyrings/mullvad-keyring.asc https://repository.mullvad.net/deb/mullvad-keyring.asc
-echo "deb [signed-by=/usr/share/keyrings/mullvad-keyring.asc arch=$( dpkg --print-architecture )] https://repository.mullvad.net/deb/stable $(lsb_release -cs) main" > /etc/apt/sources.list.d/mullvad.list
-apt update && apt install -y mullvad-vpn
-```
-
-### 2. Install Node.js 20
+Needs Node.js 20+ and the [Mullvad daemon](https://mullvad.net/download) running.
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt install -y nodejs
-```
-
-### 3. Deploy the UI
-
-```bash
-mkdir -p /opt/mullvad-ui
-cp -r . /opt/mullvad-ui
-cd /opt/mullvad-ui
 npm install
 npm run build
-```
-
-### 4. Log in to your Mullvad account
-
-```bash
 mullvad account login <your-16-digit-account-number>
+node server.mjs                 # serves the dashboard + API on :80
+# open http://<host-ip>/
 ```
 
-### 5. Run the server
+`server.mjs` is a single Express process that serves the built `dist/` and shells out to `mullvad` for
+every action. Configure it by editing the constants at the top — `PORT` (default `80`) and `LOG_FILE`
+(default `/var/log/mullvad-blocked.log`).
 
-The app is just `node server.mjs` — wire it up however you prefer:
+## Run it as a service
 
-**systemd**
 ```bash
 cat > /etc/systemd/system/mullvad-ui.service << 'EOF'
 [Unit]
@@ -70,70 +52,35 @@ EOF
 systemctl daemon-reload && systemctl enable --now mullvad-ui
 ```
 
-**OpenRC**
-```bash
-cat > /etc/init.d/mullvad-ui << 'EOF'
-#!/sbin/openrc-run
-name="mullvad-ui"
-command="/usr/bin/node"
-command_args="/opt/mullvad-ui/server.mjs"
-directory="/opt/mullvad-ui"
-command_background=true
-pidfile="/run/mullvad-ui.pid"
-EOF
-chmod +x /etc/init.d/mullvad-ui
-rc-update add mullvad-ui default && rc-service mullvad-ui start
-```
+(There's an OpenRC equivalent — same idea, `node server.mjs` under a supervisor.) If you change anything
+under `src/`, `npm run build && systemctl restart mullvad-ui`.
 
-**Manual / tmux / screen**
-```bash
-cd /opt/mullvad-ui && node server.mjs
-```
+## Reconnect webhook
 
-The dashboard is now available at `http://<host-ip>/` on port 80.
-
-## Configuration
-
-All configuration is in `server.mjs`. Edit these constants at the top:
-
-| Constant | Default | Description |
-|---|---|---|
-| `PORT` | `80` | Port the Express server listens on |
-| `LOG_FILE` | `/var/log/mullvad-blocked.log` | Log file for the blocked-domain webhook |
-
-After changing `server.mjs`, restart the service:
-
-```bash
-systemctl restart mullvad-ui
-```
-
-If you change any source files under `src/`, rebuild first:
-
-```bash
-cd /opt/mullvad-ui && npm run build && systemctl restart mullvad-ui
-```
-
-## Changing the account
-
-You can change the logged-in Mullvad account either from the dashboard (Account card → "Change account…") or from the CLI:
-
-```bash
-mullvad account login <new-account-number>
-```
-
-## Blocked-domain webhook
-
-Other devices on your network can trigger an automatic relay reconnect by calling:
+Any device on your network can trigger a relay rotation:
 
 ```
 GET/POST http://<host-ip>/api/blocked?domain=example.com&reporter=<device-name>
 ```
 
-The gateway switches to a new relay and returns the old/new relay and IP. Results are logged to `LOG_FILE`. This is useful for ad-blockers or DNS-based filters that detect blocked content and want to rotate the exit IP automatically.
+The gateway picks a fresh relay (weighted by a running score that tracks per-relay blocks and failures,
+with cooldowns and your region constraints), reconnects, logs the old→new relay and IP to `LOG_FILE`,
+and returns them. The intent: when a DNS-based ad/tracker filter notices something getting through,
+it can rotate the exit IP automatically instead of waiting for you.
 
 ## Development
 
 ```bash
-npm run dev   # Vite dev server on :5173 (proxies /api to server.mjs)
-node server.mjs  # Run the backend separately on :80
+npm run dev        # Vite dev server on :5173
+node server.mjs    # run the backend separately on :80
 ```
+
+Note the Vite dev server has no API proxy configured, so in dev the frontend's `/api/*` calls need
+`server.mjs` reachable on the same origin (or a proxy in front). The built `dist/` served by
+`server.mjs` has no such split.
+
+## Stack
+
+React 18 + React Router, a D3 `geoOrthographic` globe rendered to canvas (world topology from
+`public/countries-110m.json`), built with Vite; an Express backend (`server.mjs`) that wraps the
+`mullvad` CLI. Per-relay stats persist to `/var/lib/mullvad-ui/relay-stats.json`.
